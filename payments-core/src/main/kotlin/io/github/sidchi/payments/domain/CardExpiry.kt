@@ -16,8 +16,8 @@ public data class CardExpiry(
     public val year: Int,
 ) {
     init {
-        require(month in 1..12) { "Expiry month must be 1-12, was $month" }
-        require(year in 2000..2099) { "Expiry year must be four digits in 2000-2099, was $year" }
+        require(month in MONTHS) { "Expiry month must be 1-12, was $month" }
+        require(year in YEARS) { "Expiry year must be four digits in 2000-2099, was $year" }
     }
 
     /** The expiry as a [YearMonth]. */
@@ -27,11 +27,14 @@ public data class CardExpiry(
     public fun isExpiredOn(date: LocalDate): Boolean = YearMonth.from(date).isAfter(yearMonth)
 
     /** The `MM/YY` form printed on cards, e.g. `03/28`. */
-    override fun toString(): String = "%02d/%02d".format(month, year % 100)
+    override fun toString(): String = "%02d/%02d".format(month, year % YEARS_PER_CENTURY)
 
     /** Parsing helpers. */
     public companion object {
         private val MM_YY = Regex("""(\d{2})/(\d{2})""")
+        private val MONTHS = 1..12
+        private val YEARS = 2000..2099
+        private const val YEARS_PER_CENTURY = 100
 
         /**
          * Parses the `MM/YY` form used on cards and in Account Updater files, assuming the 2000s.
@@ -41,7 +44,7 @@ public data class CardExpiry(
         public fun parse(text: String): CardExpiry {
             val match = requireNotNull(MM_YY.matchEntire(text.trim())) { "Expected MM/YY, was '$text'" }
             val (month, year) = match.destructured
-            return CardExpiry(month.toInt(), 2000 + year.toInt())
+            return CardExpiry(month.toInt(), YEARS.first + year.toInt())
         }
     }
 }

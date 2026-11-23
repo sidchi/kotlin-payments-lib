@@ -60,7 +60,8 @@ public data class TokenizedCard(
     }
 
     /** Redacts the token so card objects are safe to log. */
-    override fun toString(): String = "TokenizedCard(brand=$brand, last4=$last4, expiry=$expiry, token=${redact(token)})"
+    override fun toString(): String =
+        "TokenizedCard(brand=$brand, last4=$last4, expiry=$expiry, token=${redact(token)})"
 
     private companion object {
         val LAST4 = Regex("""\d{4}""")
@@ -97,4 +98,7 @@ private fun requireValidToken(token: String) {
     }
 }
 
-private fun redact(token: String): String = if (token.length <= 4) "****" else "****" + token.takeLast(4)
+private const val VISIBLE_TOKEN_SUFFIX = 4
+
+private fun redact(token: String): String =
+    if (token.length <= VISIBLE_TOKEN_SUFFIX) "****" else "****" + token.takeLast(VISIBLE_TOKEN_SUFFIX)
