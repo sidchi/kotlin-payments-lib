@@ -3,8 +3,7 @@ package io.github.sidchi.payments
 /**
  * Build metadata for kotlin-payments-lib.
  *
- * The domain model (money, payment methods, charges, declines) lands in the next roadmap item;
- * this object exists so the scaffold has a public API surface to compile, lint and test.
+ * The domain model (money, payment methods, charges, declines) lives in [io.github.sidchi.payments.domain].
  */
 public object PaymentsLib {
     /** Library version. A test keeps this in sync with `version` in `gradle.properties`. */
