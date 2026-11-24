@@ -6,8 +6,8 @@ A Kotlin library for **resilient recurring payments**: idempotent charges, decli
 processors, multi-currency money, and an Account Updater simulator. Gateways are mocked; there are no real processor
 credentials or proprietary code, and every card number in this repo is synthetic.
 
-> **Status:** core domain model in place (money, payment methods, charges, decline taxonomy). Multi-currency
-> conversion is next. See [ROADMAP.md](ROADMAP.md).
+> **Status:** core domain model and multi-currency conversion in place. Idempotency stores are next.
+> See [ROADMAP.md](ROADMAP.md).
 
 ## Why
 
@@ -52,10 +52,11 @@ Everything lives in `io.github.sidchi.payments.domain` and is immutable.
 
 | Type | What it models |
 |------|----------------|
-| `Money`, `Currency` | Exact amounts as a `Long` of minor units (JPY 0, USD 2, KWD 3 digits). No implicit rounding, no silent overflow, no cross-currency arithmetic. `allocate()` splits an amount by ratios without losing a minor unit. |
+| `Money`, `Currency` | Exact amounts as a `Long` of minor units (JPY 0, USD 2, KWD 3, CLF 4 digits). No implicit rounding, no silent overflow, no cross-currency arithmetic. `allocate()` splits an amount by ratios without losing a minor unit. `Currency` is a curated ISO 4217 table (alphabetic + numeric codes) verified against the JDK in tests. |
+| `ExchangeRate`, `Conversion` | A directional, timestamped, sourced rate; `convert(money, roundingMode)` returns a `Conversion` recording the input, output, rate and rounding mode, so every FX result is auditable. |
 | `PaymentMethod` | Sealed: `TokenizedCard` (brand, last4, `CardExpiry`) or `Wallet` (Apple Pay, Google Pay, PayPal). Tokens only: anything that looks like a raw PAN is rejected and `toString` redacts tokens. |
-| `ChargeRequest` | Idempotency key, positive amount, payment method, customer, and `ChargeInitiator` (customer- vs. merchant-initiated, which changes SCA and retry rules). |
-| `ChargeResult` | Sealed: `Approved`, `Declined(Decline)`, or `Failed(FailureReason)`. `FailureReason.outcomeKnown` separates "definitely not charged" from "maybe charged" (timeouts), which must be retried with the same key. |
+| `ChargeRequest` | Idempotency key, positive **presentment** amount, payment method, customer, `ChargeInitiator` (customer- vs. merchant-initiated, which changes SCA and retry rules), and an optional **settlement** currency. |
+| `ChargeResult` | Sealed: `Approved` (with an optional settlement `Conversion`), `Declined(Decline)`, or `Failed(FailureReason)`. `FailureReason.outcomeKnown` separates "definitely not charged" from "maybe charged" (timeouts), which must be retried with the same key. |
 | `DeclineReason` | Sealed **soft vs. hard** taxonomy (`DeclineReason.Soft` / `DeclineReason.Hard`), each reason carrying a default `RecoveryAction`: retry later, authenticate the customer, update the payment method, or stop. |
 | `Iso8583DeclineCodes` | Maps common ISO 8583 response codes (`05`, `51`, `54`, `1A`, `R0`, ...) to reasons. Unknown codes fail closed as hard declines. |
 
@@ -79,6 +80,46 @@ when (val result = gateway.charge(request)) {          // gateway arrives in roa
         if (result.reason.outcomeKnown) scheduleRetry(request) else reconcileThenRetry(request)
 }
 ```
+
+## Multi-currency
+
+Exchange-rate plumbing lives in `io.github.sidchi.payments.fx`:
+
+| Type | Role |
+|------|------|
+| `RateSnapshot` | A consistent set of rates published at one instant, quoted against one base currency. Cross rates are derived through the base, so `A -> B -> A` multiplies back to 1 and a snapshot can't contain arbitrage. |
+| `ExchangeRateProvider` | `fun interface` returning the newest snapshot. All conversions in a batch should use one snapshot. |
+| `InMemoryExchangeRateProvider` | Thread-safe mock/source for tests and simulations; refuses to publish a snapshot older than the current one. |
+| `CurrencyConverter` | Converts with a required `RoundingMode` and refuses rates older than `maxRateAge` (`StaleExchangeRateException`). Same-currency conversion never touches the provider. |
+
+```kotlin
+val converter = CurrencyConverter(provider, maxRateAge = Duration.ofHours(26))
+
+val request = ChargeRequest(
+    idempotencyKey = IdempotencyKey("sub_123:renewal:2026-12"),
+    amount = Money.of("12.00", Currency.GBP),          // presented to the customer
+    paymentMethod = wallet,
+    customerId = "cus_123",
+    settlementCurrency = Currency.USD,                 // paid out to the merchant
+)
+
+val fx = converter.convert(request.amount, request.settlementCurrency, RoundingMode.HALF_EVEN)
+val approved = ChargeResult.Approved(request.idempotencyKey, chargeId, request.amount, settlementConversion = fx)
+approved.settlementAmount   // USD amount, with the rate, source and timestamp kept in `fx`
+```
+
+Design notes:
+
+- **Rounding is always explicit.** `HALF_EVEN` for neutral reporting, `DOWN` for a customer quote you must honor,
+  `UP` when collecting enough to cover a settlement amount. A default would hide a business decision.
+- **ISO exponents, not processor exponents.** A few processors treat ISO two-decimal currencies (e.g. HUF, TWD) as
+  zero-decimal on the wire; that belongs in the gateway adapter, not in `Currency`.
+- **Stale rates fail loudly.** Converting on yesterday's rate is how a merchant silently eats an FX move; the caller
+  decides whether to fail, settle in presentment currency, or alert.
+
+Property-based tests (Kotest) check that conversion is monotonic, symmetric around zero, within half a minor unit of
+the exact product, and that floor/ceiling bracket half-even by at most one minor unit, across every currency pair.
+All rates in tests are synthetic.
 
 ## Modules
 

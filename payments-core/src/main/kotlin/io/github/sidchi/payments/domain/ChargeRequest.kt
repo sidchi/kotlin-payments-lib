@@ -42,6 +42,11 @@ public enum class ChargeInitiator {
 /**
  * A request to charge [amount] to [paymentMethod].
  *
+ * [amount] is the **presentment** amount: what the customer sees and is charged, in their currency. The merchant may
+ * want the funds in a different **settlement** currency (e.g. a US merchant charging `EUR 19.99` and settling in USD);
+ * when [settlementCurrency] differs from the presentment currency the charge [requiresFx] and the approval records the
+ * [Conversion] that was applied.
+ *
  * The request is a value: retrying means re-sending the *same* request with the *same* [idempotencyKey].
  */
 public data class ChargeRequest(
@@ -59,7 +64,15 @@ public data class ChargeRequest(
     public val description: String? = null,
     /** Free-form key/value pairs passed through to the processor (e.g. subscription and invoice ids). */
     public val metadata: Map<String, String> = emptyMap(),
+    /** Currency the merchant wants to be paid out in. Defaults to the presentment currency (no FX). */
+    public val settlementCurrency: Currency = amount.currency,
 ) {
+    /** The presentment currency: the currency of [amount]. */
+    public val presentmentCurrency: Currency get() = amount.currency
+
+    /** True when the charge settles in a different currency from the one presented to the customer. */
+    public val requiresFx: Boolean get() = settlementCurrency != presentmentCurrency
+
     init {
         require(amount.isPositive) { "Charge amount must be positive, was $amount" }
         require(customerId.isNotBlank()) { "customerId must not be blank" }

@@ -4,6 +4,9 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import java.math.BigDecimal
+import java.math.RoundingMode
+import java.time.Instant
 
 class ChargeSpec : FunSpec({
     val key = IdempotencyKey("sub_123:renewal:2026-12")
@@ -35,6 +38,17 @@ class ChargeSpec : FunSpec({
             shouldThrow<IllegalArgumentException> { request(Money.of("-1.00", Currency.USD)) }
         }
 
+        test("settles in the presentment currency unless told otherwise") {
+            val plain = request(Money.of("9.99", Currency.EUR))
+            plain.presentmentCurrency shouldBe Currency.EUR
+            plain.settlementCurrency shouldBe Currency.EUR
+            plain.requiresFx shouldBe false
+
+            val crossBorder = plain.copy(settlementCurrency = Currency.USD)
+            crossBorder.presentmentCurrency shouldBe Currency.EUR
+            crossBorder.requiresFx shouldBe true
+        }
+
         test("customerId must not be blank") {
             shouldThrow<IllegalArgumentException> { request(Money.of("1.00", Currency.USD)).copy(customerId = "") }
         }
@@ -55,6 +69,25 @@ class ChargeSpec : FunSpec({
                 }
             }
             summary shouldBe listOf("approved USD 9.99", "declined InsufficientFunds", "failed TIMEOUT")
+        }
+
+        test("an approval without FX settles the authorized amount") {
+            val approved = ChargeResult.Approved(key, "ch_1", Money.of("9.99", Currency.USD))
+            approved.settlementConversion shouldBe null
+            approved.settlementAmount shouldBe Money.of("9.99", Currency.USD)
+        }
+
+        test("an approval with FX settles the converted amount, which must come from the authorized amount") {
+            val eurUsd = ExchangeRate(Currency.EUR, Currency.USD, BigDecimal("1.0842"), Instant.EPOCH, "mock")
+            val presented = Money.of("9.99", Currency.EUR)
+            val fx = eurUsd.convert(presented, RoundingMode.HALF_EVEN)
+
+            ChargeResult.Approved(key, "ch_1", presented, settlementConversion = fx)
+                .settlementAmount shouldBe Money.of("10.83", Currency.USD) // 10.831158
+
+            shouldThrow<IllegalArgumentException> {
+                ChargeResult.Approved(key, "ch_1", Money.of("5.00", Currency.EUR), settlementConversion = fx)
+            }.message shouldContain "must equal the authorized amount"
         }
 
         test("timeouts and network errors leave the outcome unknown") {

@@ -17,11 +17,25 @@ public sealed interface ChargeResult {
         override val idempotencyKey: IdempotencyKey,
         /** Processor's identifier for the charge, used for captures, refunds and disputes. */
         public val chargeId: String,
-        /** Amount authorized. */
+        /** Amount authorized, in the presentment currency. */
         public val amount: Money,
         /** Issuer authorization code, when the processor returns one. */
         public val authorizationCode: String? = null,
-    ) : ChargeResult
+        /**
+         * Presentment-to-settlement conversion, when the charge settles in another currency; `null` when it settles
+         * in the presentment currency. Its [Conversion.source] is always [amount].
+         */
+        public val settlementConversion: Conversion? = null,
+    ) : ChargeResult {
+        init {
+            require(settlementConversion == null || settlementConversion.source == amount) {
+                "Settlement conversion source ${settlementConversion?.source} must equal the authorized amount $amount"
+            }
+        }
+
+        /** Amount the merchant settles: the converted amount when FX applied, otherwise [amount]. */
+        public val settlementAmount: Money get() = settlementConversion?.converted ?: amount
+    }
 
     /** The issuer or processor refused the charge. */
     public data class Declined(
