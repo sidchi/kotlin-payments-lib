@@ -44,13 +44,19 @@ public class IdempotentChargeExecutor(
         charge: (ChargeRequest, IdempotencyLease) -> ChargeResult,
     ): IdempotentOutcome {
         val fingerprint = RequestFingerprint.of(request)
-        val lease = when (val acquired = store.tryAcquire(request.idempotencyKey, fingerprint, leaseDuration)) {
-            is AcquireResult.Acquired -> acquired.lease
-            is AcquireResult.AlreadyCompleted -> return IdempotentOutcome.Replayed(acquired.result)
-            is AcquireResult.InProgress -> return IdempotentOutcome.InProgress(acquired.leaseExpiresAt)
-            is AcquireResult.FingerprintMismatch -> return IdempotentOutcome.KeyReused(acquired.stored, fingerprint)
+        return when (val acquired = store.tryAcquire(request.idempotencyKey, fingerprint, leaseDuration)) {
+            is AcquireResult.Acquired -> runCharge(request, acquired.lease, charge)
+            is AcquireResult.AlreadyCompleted -> IdempotentOutcome.Replayed(acquired.result)
+            is AcquireResult.InProgress -> IdempotentOutcome.InProgress(acquired.leaseExpiresAt)
+            is AcquireResult.FingerprintMismatch -> IdempotentOutcome.KeyReused(acquired.stored, fingerprint)
         }
+    }
 
+    private fun runCharge(
+        request: ChargeRequest,
+        lease: IdempotencyLease,
+        charge: (ChargeRequest, IdempotencyLease) -> ChargeResult,
+    ): IdempotentOutcome.Executed {
         // An exception leaves the lease in place on purpose: we can't know whether the processor saw the request.
         val result = charge(request, lease)
         require(result.idempotencyKey == request.idempotencyKey) {

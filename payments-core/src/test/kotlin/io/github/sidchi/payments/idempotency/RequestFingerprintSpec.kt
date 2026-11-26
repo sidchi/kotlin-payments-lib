@@ -49,7 +49,8 @@ class RequestFingerprintSpec : FunSpec({
     }
 
     test("absent and empty descriptions differ") {
-        RequestFingerprint.of(base.copy(description = "")) shouldNotBe RequestFingerprint.of(base.copy(description = null))
+        val empty = RequestFingerprint.of(base.copy(description = ""))
+        empty shouldNotBe RequestFingerprint.of(base.copy(description = null))
     }
 
     test("field boundaries can't be shifted to forge a collision") {

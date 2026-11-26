@@ -21,6 +21,9 @@ import java.time.temporal.ChronoUnit
 import java.util.UUID
 import javax.sql.DataSource
 
+private const val STATE_IN_PROGRESS = "IN_PROGRESS"
+private const val STATE_COMPLETED = "COMPLETED"
+
 /**
  * [IdempotencyStore] backed by the `payment_idempotency_keys` table (see [PostgresIdempotencySchema]).
  *
@@ -71,11 +74,13 @@ public class PostgresIdempotencyStore(
         val encoded = ChargeResultCodec.encode(result).toSortedMap()
         val updated = dataSource.connection.use { connection ->
             connection.prepareStatement(COMPLETE_SQL).use { st ->
-                st.setArray(1, connection.createArrayOf("text", encoded.keys.toTypedArray()))
-                st.setArray(2, connection.createArrayOf("text", encoded.values.toTypedArray()))
-                st.setInstant(3, now())
-                st.setString(4, lease.key.value)
-                st.setString(5, lease.token)
+                st.bind(
+                    connection.createArrayOf("text", encoded.keys.toTypedArray()),
+                    connection.createArrayOf("text", encoded.values.toTypedArray()),
+                    now().toTimestamptz(),
+                    lease.key.value,
+                    lease.token,
+                )
                 st.executeUpdate()
             }
         }
@@ -84,8 +89,7 @@ public class PostgresIdempotencyStore(
 
     override fun release(lease: IdempotencyLease): Boolean = dataSource.connection.use { connection ->
         connection.prepareStatement(RELEASE_SQL).use { st ->
-            st.setString(1, lease.key.value)
-            st.setString(2, lease.token)
+            st.bind(lease.key.value, lease.token)
             st.executeUpdate() > 0
         }
     }
@@ -94,7 +98,7 @@ public class PostgresIdempotencyStore(
 
     override fun purgeCompletedBefore(cutoff: Instant): Int = dataSource.connection.use { connection ->
         connection.prepareStatement(PURGE_SQL).use { st ->
-            st.setInstant(1, cutoff)
+            st.bind(cutoff.toTimestamptz())
             st.executeUpdate()
         }
     }
@@ -109,50 +113,19 @@ public class PostgresIdempotencyStore(
         expiresAt: Instant,
         now: Instant,
     ): Int? = prepareStatement(ACQUIRE_SQL).use { st ->
-        st.setString(1, key.value)
-        st.setString(2, fingerprint.value)
-        st.setString(3, token)
-        st.setInstant(4, expiresAt)
-        st.setInstant(5, now) // created_at
-        st.setInstant(6, now) // updated_at
+        val at = now.toTimestamptz()
+        // Parameters: key, fingerprint, lease token, lease expiry, created_at, updated_at.
+        st.bind(key.value, fingerprint.value, token, expiresAt.toTimestamptz(), at, at)
         st.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else null }
     }
 
     private fun Connection.select(key: IdempotencyKey): IdempotencyRecord? = prepareStatement(SELECT_SQL).use { st ->
-        st.setString(1, key.value)
+        st.bind(key.value)
         st.executeQuery().use { rs -> if (rs.next()) rs.toRecord(key) else null }
     }
 
-    private fun ResultSet.toRecord(key: IdempotencyKey): IdempotencyRecord {
-        val fingerprint = RequestFingerprint(getString("fingerprint"))
-        val attempts = getInt("attempts")
-        return when (val state = getString("state")) {
-            STATE_IN_PROGRESS ->
-                IdempotencyRecord.InProgress(key, fingerprint, attempts, getInstant("lease_expires_at"))
-            STATE_COMPLETED -> {
-                val keys = getStringArray("result_keys")
-                val values = getStringArray("result_values")
-                check(keys.size == values.size) { "Corrupt result for key '$key'" }
-                val result = ChargeResultCodec.decode(keys.zip(values).toMap())
-                IdempotencyRecord.Completed(key, fingerprint, attempts, result, getInstant("updated_at"))
-            }
-            else -> error("Unknown idempotency state '$state' for key '$key'")
-        }
-    }
-
-    private fun ResultSet.getInstant(column: String): Instant =
-        getObject(column, OffsetDateTime::class.java).toInstant()
-
-    private fun ResultSet.getStringArray(column: String): List<String> =
-        (getArray(column).array as Array<*>).map { it.toString() }
-
-    private fun PreparedStatement.setInstant(index: Int, instant: Instant) =
-        setObject(index, OffsetDateTime.ofInstant(instant, ZoneOffset.UTC))
-
     private companion object {
         const val MAX_ACQUIRE_ROUNDS = 5
-        const val STATE_IN_PROGRESS = "IN_PROGRESS"
-        const val STATE_COMPLETED = "COMPLETED"
 
         val ACQUIRE_SQL = """
             INSERT INTO payment_idempotency_keys AS k
@@ -198,3 +171,33 @@ public class PostgresIdempotencyStore(
         """.trimIndent()
     }
 }
+
+private fun ResultSet.toRecord(key: IdempotencyKey): IdempotencyRecord {
+    val fingerprint = RequestFingerprint(getString("fingerprint"))
+    val attempts = getInt("attempts")
+    return when (val state = getString("state")) {
+        STATE_IN_PROGRESS ->
+            IdempotencyRecord.InProgress(key, fingerprint, attempts, getInstant("lease_expires_at"))
+        STATE_COMPLETED -> {
+            val keys = getStringArray("result_keys")
+            val values = getStringArray("result_values")
+            check(keys.size == values.size) { "Corrupt result for key '$key'" }
+            val result = ChargeResultCodec.decode(keys.zip(values).toMap())
+            IdempotencyRecord.Completed(key, fingerprint, attempts, result, getInstant("updated_at"))
+        }
+        else -> error("Unknown idempotency state '$state' for key '$key'")
+    }
+}
+
+private fun ResultSet.getInstant(column: String): Instant =
+    getObject(column, OffsetDateTime::class.java).toInstant()
+
+private fun ResultSet.getStringArray(column: String): List<String> =
+    (getArray(column).array as Array<*>).map { it.toString() }
+
+/** Binds [params] to the statement's placeholders in order; pgjdbc maps each type (text, text[], timestamptz). */
+private fun PreparedStatement.bind(vararg params: Any) {
+    params.forEachIndexed { i, value -> setObject(i + 1, value) }
+}
+
+private fun Instant.toTimestamptz(): OffsetDateTime = OffsetDateTime.ofInstant(this, ZoneOffset.UTC)
