@@ -5,6 +5,8 @@ plugins {
     alias(libs.plugins.kotlin.jvm)
     alias(libs.plugins.detekt)
     `java-library`
+    // Shares the IdempotencyStore contract suite and sample data with store modules (e.g. Postgres).
+    `java-test-fixtures`
 }
 
 description = "Core domain, retry and fallback primitives for resilient recurring payments."
@@ -31,7 +33,11 @@ dependencies {
     testImplementation(libs.kotest.runner.junit5)
     testImplementation(libs.kotest.assertions.core)
     testImplementation(libs.kotest.property)
+    testImplementation(kotlin("reflect")) // sealed-hierarchy completeness checks
     testRuntimeOnly(libs.junit.platform.launcher)
+
+    testFixturesImplementation(libs.kotest.runner.junit5)
+    testFixturesImplementation(libs.kotest.assertions.core)
 
     detektPlugins(libs.detekt.formatting)
 }

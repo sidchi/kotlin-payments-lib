@@ -6,6 +6,7 @@ detekt = "1.23.8"
 detekt-kotlin = "2.0.21"
 junit = "5.11.4"
 kotest = "5.9.1"
+postgresql = "42.7.5"
 
 [libraries]
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
@@ -14,6 +15,7 @@ junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher
 kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
 kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
 kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 detekt-formatting = { module = "io.gitlab.arturbosch.detekt:detekt-formatting", version.ref = "detekt" }
 
 [plugins]

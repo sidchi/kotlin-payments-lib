@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 }
 
 include(":payments-core")
+include(":payments-idempotency-postgres")

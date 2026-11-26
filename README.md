@@ -6,7 +6,8 @@ A Kotlin library for **resilient recurring payments**: idempotent charges, decli
 processors, multi-currency money, and an Account Updater simulator. Gateways are mocked; there are no real processor
 credentials or proprietary code, and every card number in this repo is synthetic.
 
-> **Status:** core domain model and multi-currency conversion in place. Idempotency stores are next.
+> **Status:** core domain model, multi-currency conversion and idempotent charge execution (in-memory and Postgres
+> stores) in place. The gateway abstraction and mock processors are next.
 > See [ROADMAP.md](ROADMAP.md).
 
 ## Why
@@ -121,13 +122,61 @@ Property-based tests (Kotest) check that conversion is monotonic, symmetric arou
 the exact product, and that floor/ceiling bracket half-even by at most one minor unit, across every currency pair.
 All rates in tests are synthetic.
 
+## Idempotency
+
+`io.github.sidchi.payments.idempotency` makes "charge at most once" a property of the library rather than of every
+caller. A store grants a **lease** per idempotency key; only the lease holder may call the processor.
+
+| Type | Role |
+|------|------|
+| `IdempotencyStore` | `tryAcquire` / `complete` / `release` / `find` / `purgeCompletedBefore`. Exactly one concurrent caller acquires a key; the rest see `InProgress`, the stored result, or a `FingerprintMismatch`. |
+| `RequestFingerprint` | SHA-256 of what decides the money movement (amount, currencies, token, customer, initiator, description, metadata). A key reused for a *different* request is a client bug and is rejected, not replayed. Display-only card data is excluded so an Account Updater expiry refresh doesn't break a retry. |
+| `IdempotentChargeExecutor` | Drives the protocol around a `charge` function and decides what each result means for retries (table below). |
+| `InMemoryIdempotencyStore` | Lock-free per key via `ConcurrentHashMap.compute`; for tests and single-instance services. |
+| `PostgresIdempotencyStore` | In `payments-idempotency-postgres`. One `INSERT ... ON CONFLICT DO UPDATE ... WHERE` per acquire; results stored as flat, queryable `jsonb` via `ChargeResultCodec`. |
+
+| Result | Store action | A retry with the same key… |
+|---|---|---|
+| `Approved`, `Declined` | complete | replays the stored result |
+| `Failed(INVALID_REQUEST)` | complete | replays it; the same request fails the same way |
+| `Failed`, outcome known (503, 429) | release | calls the processor again immediately |
+| `Failed`, outcome unknown (timeout), or an exception | leave the lease to expire | waits, then **takes over** (`lease.isTakeover`) |
+
+```kotlin
+val executor = IdempotentChargeExecutor(PostgresIdempotencyStore(dataSource), leaseDuration = Duration.ofSeconds(60))
+
+when (val outcome = executor.execute(request) { req, lease -> gateway.charge(req) }) {   // forwards req.idempotencyKey
+    is IdempotentOutcome.Executed -> respond(outcome.result)
+    is IdempotentOutcome.Replayed -> respond(outcome.result)              // retry of a finished charge
+    is IdempotentOutcome.InProgress -> conflict(retryAfter = outcome.retryAfter)   // HTTP 409
+    is IdempotentOutcome.KeyReused -> unprocessable("Idempotency key reused")      // HTTP 422
+}
+```
+
+Design notes:
+
+- **No transaction spans the processor call.** Holding a row lock (or an open transaction) across a network call to a
+  processor ties database connections to the processor's latency and turns a processor brown-out into a pool
+  exhaustion. A lease is a plain row with an expiry, written and read in single auto-committed statements.
+- **Unknown outcomes wait out the lease instead of releasing it.** After a timeout the charge may exist at the
+  processor. Releasing would let an immediate retry race the processor; waiting for expiry gives it time to settle, and
+  the takeover re-sends the *same* key so the processor's own idempotency turns it into a lookup.
+- **Lease length must exceed the processor timeout.** Otherwise a slow-but-alive holder can be taken over mid-call. If
+  that happens anyway, the late holder's write fails (`LeaseLostException`, surfaced as `Persistence.LEASE_LOST`) and
+  the processor-side key still prevents a double charge.
+- **App clock, not database `now()`.** Lease arithmetic uses the injected `Clock`, which keeps both stores identical and
+  testable; hosts need NTP-synchronized clocks, and lease durations should dwarf any skew.
+- **One contract, every store.** `idempotencyStoreContract` (in `payments-core` test fixtures) runs the same suite,
+  including a 16-thread race over 25 keys, against the in-memory store and a real Postgres.
+
 ## Modules
 
 | Module          | Purpose                                                        |
 |-----------------|----------------------------------------------------------------|
-| `payments-core` | Domain model, retry and fallback primitives (pure Kotlin, JVM) |
+| `payments-core` | Domain model, FX, idempotency, retry and fallback primitives (pure Kotlin, JVM, no runtime deps) |
+| `payments-idempotency-postgres` | `PostgresIdempotencyStore` + schema migration (`db/migration/V1__create_payment_idempotency_keys.sql`); plain JDBC, bring your own driver and pool |
 
-More modules (Postgres idempotency store, sample Ktor service) arrive with later roadmap items.
+A sample Ktor service arrives with a later roadmap item.
 
 ## Build
 
@@ -137,6 +186,16 @@ Requires JDK 21 (bytecode targets Java 17). The Gradle wrapper downloads everyth
 ./gradlew build          # compile, detekt (incl. ktlint rules), unit tests
 ./gradlew test           # tests only
 ./gradlew detekt         # static analysis only; HTML report in payments-core/build/reports/detekt/
+```
+
+The Postgres store's integration tests run when `PAYMENTS_TEST_POSTGRES_URL` points at a disposable database (CI
+provides one as a service container; without it they're skipped locally and fail on CI):
+
+```bash
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=payments -e POSTGRES_USER=payments \
+  -e POSTGRES_DB=payments_test postgres:16-alpine
+PAYMENTS_TEST_POSTGRES_URL='jdbc:postgresql://localhost:5432/payments_test?user=payments&password=payments' \
+  ./gradlew :payments-idempotency-postgres:test
 ```
 
 ## Tooling
