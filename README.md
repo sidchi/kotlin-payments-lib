@@ -6,8 +6,8 @@ A Kotlin library for **resilient recurring payments**: idempotent charges, decli
 processors, multi-currency money, and an Account Updater simulator. Gateways are mocked; there are no real processor
 credentials or proprietary code, and every card number in this repo is synthetic.
 
-> **Status:** core domain model, multi-currency conversion and idempotent charge execution (in-memory and Postgres
-> stores) in place. The gateway abstraction and mock processors are next.
+> **Status:** core domain model, multi-currency conversion, idempotent charge execution (in-memory and Postgres
+> stores), and the gateway abstraction with two mock processors are in place. The decline-aware retry engine is next.
 > See [ROADMAP.md](ROADMAP.md).
 
 ## Why
@@ -69,7 +69,7 @@ val request = ChargeRequest(
     customerId = "cus_123",
 )
 
-when (val result = gateway.charge(request)) {          // gateway arrives in roadmap item 5
+when (val result = gateway.charge(request)) {          // any PaymentGateway, e.g. a MockProcessor
     is ChargeResult.Approved -> markPaid(result.chargeId)
     is ChargeResult.Declined -> when (result.decline.recoveryAction) {
         RecoveryAction.RETRY_LATER -> scheduleRetry(request)            // same idempotency key
@@ -169,11 +169,69 @@ Design notes:
 - **One contract, every store.** `idempotencyStoreContract` (in `payments-core` test fixtures) runs the same suite,
   including a 16-thread race over 25 keys, against the in-memory store and a real Postgres.
 
+## Gateways and mock processors
+
+`io.github.sidchi.payments.gateway` is the adapter boundary. Everything above it (retry engine, router, dunning)
+sees only normalized `ChargeResult`s; everything processor-specific lives below it.
+
+| Type | Role |
+|------|------|
+| `PaymentGateway` | One processor connection: `charge(request)` makes **one** attempt and never throws for processor outcomes; `lookup(key)` asks what happened to an earlier attempt without charging. |
+| `ProcessorId` | Slug naming a *connection* (`meridian-us`), the key for future per-processor retry budgets and circuit breakers. |
+| `GatewayCapabilities` | Presentment/settlement currencies, card brands and wallets a connection accepts; `supports(request)` lets a router skip guaranteed rejections. |
+| `MockProcessor` | Seeded, thread-safe fake processor (below). |
+| `ProcessorDialect` | A processor's raw decline codes and id formats, and their mapping to the `DeclineReason` taxonomy. |
+| `MockTokens` | Magic tokens that force an outcome: `APPROVE`, `decline("51")`, `TIMEOUT`, `TIMEOUT_AFTER_PROCESSING`, `NETWORK_ERROR`, `UNAVAILABLE`, `RATE_LIMITED`. |
+
+Two deliberately different fictional processors come ready-made in `MockProcessors`:
+
+| | Meridian | Tessera |
+|---|---|---|
+| Decline codes | ISO 8583 (`51`, `05`, `54`) | snake_case (`insufficient_funds`, `card_declined`) |
+| Cards / wallets | Visa, Mastercard, Amex, Discover / — | Visa, Mastercard / Apple Pay, Google Pay |
+| Presentment / settlement | USD, EUR, GBP / USD, EUR, GBP | + JPY, INR, KWD / USD, EUR |
+
+```kotlin
+val flaky = MockProcessors.tessera(
+    config = MockProcessorConfig(
+        capabilities = MockProcessors.TESSERA_CAPABILITIES,
+        latency = LatencyModel.Spiky(
+            base = LatencyModel.Uniform(Duration.ofMillis(80), Duration.ofMillis(250)),
+            spike = LatencyModel.Fixed(Duration.ofSeconds(15)),     // long tail -> timeouts
+            spikeProbability = 0.02,
+        ),
+        timeout = Duration.ofSeconds(5),
+        faults = FaultRates(unavailable = 0.03, rateLimited = 0.01, networkError = 0.005),
+        declineRate = 0.12,
+        declineCodes = mapOf("insufficient_funds" to 5, "card_declined" to 3, "expired_card" to 1),
+        processedWhenResponseLost = 0.5,                           // a lost response may still have charged
+    ),
+    seed = 2026,
+)
+```
+
+Each call draws, in order: an infrastructure fault (503/429 before processing, or a dropped connection), then a
+decision (decline with a code from the mix, or approve), then latency (over the timeout means `Failed(TIMEOUT)` after
+waiting exactly the timeout). Design notes:
+
+- **Processor-side idempotency is simulated, not assumed.** The mock records results per key: a same-key retry replays
+  the original charge, a key reused with different parameters is `INVALID_REQUEST`. Paired with
+  `IdempotentChargeExecutor`, a takeover calls `lookup` first, so "timed out but charged" ends as exactly one charge
+  (see `GatewayIdempotencySpec`).
+- **Timeouts are emergent.** They come from the latency model's tail crossing the client deadline, not from a separate
+  "timeout rate", so tightening a timeout in a test changes the failure rate the way it would in production.
+- **Raw codes stay in the processor's dialect.** Configs and magic tokens use the processor's own codes, and the
+  dialect owns the mapping. A code from the wrong dialect (`"51"` sent to Tessera) normalizes to `Unknown`, which fails
+  closed as a hard decline — the safe default for a code an adapter has never seen.
+- **Synchronous for now.** `charge` blocks for the simulated latency through an injectable `Sleeper`, so tests run in
+  microseconds and assert exact waits. Suspend APIs arrive with the coroutines roadmap item.
+- **Reproducible.** One seed drives every draw; the same seed, config and requests give the same results.
+
 ## Modules
 
 | Module          | Purpose                                                        |
 |-----------------|----------------------------------------------------------------|
-| `payments-core` | Domain model, FX, idempotency, retry and fallback primitives (pure Kotlin, JVM, no runtime deps) |
+| `payments-core` | Domain model, FX, idempotency, gateway abstraction and mock processors; retry and fallback next (pure Kotlin, JVM, no runtime deps) |
 | `payments-idempotency-postgres` | `PostgresIdempotencyStore` + schema migration (`db/migration/V1__create_payment_idempotency_keys.sql`); plain JDBC, bring your own driver and pool |
 
 A sample Ktor service arrives with a later roadmap item.
