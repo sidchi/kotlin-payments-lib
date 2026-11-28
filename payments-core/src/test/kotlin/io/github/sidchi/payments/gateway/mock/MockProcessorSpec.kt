@@ -21,7 +21,6 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.collections.shouldContainExactly
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.doubles.plusOrMinus
-import io.kotest.matchers.maps.shouldContainKeys
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
@@ -259,8 +258,7 @@ class MockProcessorSpec : FunSpec({
         test("without an explicit mix, declines are drawn from the dialect's default mix") {
             val results = requests(2_000).map(meridian(config = healthy.copy(declineRate = 1.0))::charge)
             val codes = results.filterIsInstance<ChargeResult.Declined>().map { it.decline.rawCode }.toSet()
-            MeridianDialect.defaultDeclineMix.shouldContainKeys(*codes.toTypedArray())
-            codes.size shouldBe MeridianDialect.defaultDeclineMix.size
+            codes shouldBe MeridianDialect.defaultDeclineMix.keys
         }
 
         test("long-tail latency produces timeouts at the spike rate, and each waits only the timeout") {
